@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "floret-torch"
+version = "0.1.0"
+description = "GPU training for floret (fastText + Bloom subword table) vectors in PyTorch"
+requires-python = ">=3.9"
+dependencies = ["numpy", "mmh3"]
+
+[project.optional-dependencies]
+# torch is deliberately not a hard dependency: on Colab and most GPU boxes it
+# is already present, and pip would otherwise pull a second multi-GB copy.
+bench = ["floret", "pytest"]
+weasel = ["spacy>=3.2", "weasel", "datasets"]
+
+[project.scripts]
+floret-torch = "floret_torch.train:main"
+
+[tool.setuptools]
+packages = ["floret_torch"]

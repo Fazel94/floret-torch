@@ -17,7 +17,11 @@ description: |
 
 vars:
   lang: "fa"
-  name: "fa_vectors"
+  # Directory name for the pipeline, and the model name spaCy registers.
+  # `spacy package` prepends the language, so model_name "floret"
+  # yields the installable package `fa_floret`.
+  name: "fa_floret"
+  model_name: "floret"
   # Corpus size. Persian Wikipedia is ~1M articles; 400k articles is a solid
   # vector corpus and fits a Colab session. Set to -1 for everything.
   max_texts: 400000
@@ -41,6 +45,9 @@ vars:
   vector_dtype: "fp32"
   vector_model: "cbow"
   vector_thread: 2
+  package_dir: "/content/packages"
+  package_version: "0.1.0"
+  drive_dir: "/content/drive/MyDrive/floret_fa"
 
 directories: ["corpus", "vectors", "packages"]
 
@@ -49,6 +56,7 @@ workflows:
     - tokenize-wikipedia
     - train-vectors-gpu
     - init-vectors
+    - package-vectors
   cpu:
     - tokenize-wikipedia
     - train-vectors-cpu
@@ -129,11 +137,33 @@ commands:
         ${vars.vectors_dir}/${vars.lang}.floret
         ${vars.vectors_dir}/${vars.name}
         --mode floret
-        --name ${vars.lang}_${vars.name}
+        --name ${vars.model_name}
     deps:
       - "${vars.vectors_dir}/${vars.lang}.floret"
     outputs:
       - "${vars.vectors_dir}/${vars.name}"
+
+  - name: "package-vectors"
+    help: "Build an installable spaCy model wheel from the vectors"
+    script:
+      # spacy package requires an existing output dir, and package_dir is an
+      # absolute path outside weasel's managed `directories`.
+      - "mkdir -p ${vars.package_dir}"
+      - >-
+        python -m spacy package
+        ${vars.vectors_dir}/${vars.name}
+        ${vars.package_dir}
+        --name ${vars.model_name}
+        --version ${vars.package_version}
+        --build wheel
+        --force
+    deps:
+      - "${vars.vectors_dir}/${vars.name}"
+
+  - name: "save-to-drive"
+    help: "Copy vectors + wheel to Google Drive so they outlive the session"
+    script:
+      - "python scripts/save_to_drive.py ${vars.vectors_dir} ${vars.package_dir} ${vars.drive_dir}"
 
   - name: "evaluate-vectors"
     help: "Nearest neighbours for a few Persian probe words"

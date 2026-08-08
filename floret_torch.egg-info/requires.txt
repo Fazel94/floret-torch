@@ -1,0 +1,11 @@
+numpy
+mmh3
+
+[bench]
+floret
+pytest
+
+[weasel]
+spacy>=3.2
+weasel
+datasets

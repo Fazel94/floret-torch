@@ -1,0 +1,2 @@
+[console_scripts]
+floret-torch = floret_torch.train:main
