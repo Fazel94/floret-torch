@@ -1,0 +1,178 @@
+================================================================================
+floret GPU training on a Colab T4 -- cell-by-cell commands
+================================================================================
+
+UPLOAD THIS ONE FILE:  floret_torch_bundle.zip
+  (rebuild it any time with:  bash colab/make_bundle.sh)
+
+Runtime -> Change runtime type -> Hardware accelerator: T4 GPU
+
+WHAT CHANGED SINCE YOUR LAST RUN (both matter, read before running):
+
+  1. GRADIENT FIX. The previous bundle divided the input-row gradient by the
+     bag size L. fastText does NOT do that for cbow/skipgram, and it is
+     load-bearing: a cbow window averages ~240 subword rows, so the 1/L
+     gradient was ~240x too small to bootstrap while `wo` starts at zero.
+     That is why your run collapsed (every cosine 1.00, king -> "peaking").
+     Measured on a 25MB text8 slice, fixing it moved:
+         loss     4.018 -> 2.562
+         WS353   -0.123 -> 0.193
+         mean cos 1.000 -> 0.584
+     New flag `--input-grad` defaults to the correct `fasttext` behaviour.
+
+  2. BATCH SIZE IS NOW A CORRECTNESS KNOB, NOT JUST SPEED.
+     With the un-normalized (fastText) update, a huge batch accumulates
+     hundreds of full-size gradients onto one row at once and DIVERGES
+     (loss -> 1e14, I hit this). Your old run used --batch 262144. Do not.
+     Use 4096-16384. The new default is 8192.
+     If you ever see the loss explode, halve --batch.
+
+  3. --dtype fp16 added. Storage of both tables is fp16; every logit and
+     gradient is still computed in fp32 on the gathered slices, because an
+     SGNS update is ~1e-5 against weights ~3e-3 and fp16's ulp there is
+     ~4e-6 -- storing fp16 is fine, accumulating in fp16 would not be.
+     Your own T4 numbers say the ceiling here is modest: embedding_bag
+     fwd+bwd was 28.27ms fp32 vs 24.29ms fp16 (~14%), because this workload
+     is gather-bound, not matmul-bound (matmul was 9x, but we barely matmul).
+     Cell 7 measures it end to end so we get a real number instead of a guess.
+
+
+--------------------------------------------------------------------------------
+CELL 1 -- confirm the hardware
+--------------------------------------------------------------------------------
+!nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+import torch, os
+print('torch', torch.__version__, '| cuda', torch.version.cuda,
+      '| capability', torch.cuda.get_device_capability(0), '| vCPUs', os.cpu_count())
+
+
+--------------------------------------------------------------------------------
+CELL 2 -- dependencies
+--------------------------------------------------------------------------------
+!pip -q install mmh3 floret
+
+
+--------------------------------------------------------------------------------
+CELL 3 -- upload the bundle and unpack
+--------------------------------------------------------------------------------
+from google.colab import files
+files.upload()
+!unzip -o -q floret_torch_bundle.zip && ls floret_torch bench
+
+
+--------------------------------------------------------------------------------
+CELL 4 -- parity check (do not skip; it proves the hashing is byte-exact
+          against CPU floret before you trust any vector)
+--------------------------------------------------------------------------------
+!python -m pytest tests/test_parity.py -q
+
+
+--------------------------------------------------------------------------------
+CELL 5 -- corpus + evaluation set
+--------------------------------------------------------------------------------
+!mkdir -p data out data/wordsim353
+!test -f data/text8 || (curl -sL -o data/text8.zip http://mattmahoney.net/dc/text8.zip && unzip -o -q -d data data/text8.zip)
+!curl -sfL -o data/wordsim353/raw.txt https://raw.githubusercontent.com/mfaruqui/eval-word-vectors/master/data/word-sim/EN-WS-353-ALL.txt
+!ls -la data/text8 && wc -l data/wordsim353/raw.txt
+
+
+--------------------------------------------------------------------------------
+CELL 6 -- GPU cbow, fp32  (the reference GPU run)
+--------------------------------------------------------------------------------
+!python -m floret_torch.train \
+  --input data/text8 --output out/gpu_cbow_fp32 \
+  --model cbow --dim 300 --minn 4 --maxn 5 --hashCount 2 --bucket 50000 \
+  --epoch 1 --lr 0.05 --ws 5 --neg 5 --minCount 5 --t 1e-4 \
+  --batch 8192 --slab 4000000 --dtype fp32 --device cuda --seed 0
+
+
+--------------------------------------------------------------------------------
+CELL 7 -- GPU cbow, fp16  (same seed and params; the only change is storage)
+          Reuses cell 6's binarization cache so the timing compares training
+          only. Compare the TIMING train= line against cell 6.
+--------------------------------------------------------------------------------
+!python -m floret_torch.train \
+  --input data/text8 --output out/gpu_cbow_fp16 \
+  --model cbow --dim 300 --minn 4 --maxn 5 --hashCount 2 --bucket 50000 \
+  --epoch 1 --lr 0.05 --ws 5 --neg 5 --minCount 5 --t 1e-4 \
+  --batch 8192 --slab 4000000 --dtype fp16 --device cuda --seed 0 \
+  --workdir out/gpu_cbow_fp32.work --reuse-cache
+
+
+--------------------------------------------------------------------------------
+CELL 8 -- CPU baseline, identical hyperparameters
+          NOTE: Colab gives ~2 vCPUs, so this is roughly 2x slower than a
+          4-core desktop. On my 4-core laptop this same run took 188s.
+          Quote the ratio with that caveat attached.
+--------------------------------------------------------------------------------
+import os
+NCPU = os.cpu_count()
+!python bench/cpu_baseline.py --input data/text8 --output out/cpu_cbow \
+  --model cbow --dim 300 --epoch 1 --thread {NCPU}
+
+
+--------------------------------------------------------------------------------
+CELL 9 -- quality: this is the number that decides whether the GPU run is
+          usable. Gate: GPU WS353 >= CPU WS353 - 0.05.
+          For reference, my 4-core CPU run on full text8 scored 0.2875,
+          and the OLD broken GPU run scored 0.1588.
+--------------------------------------------------------------------------------
+!python bench/eval.py --vec out/gpu_cbow_fp32.vec --compare out/cpu_cbow.vec --topn 8
+print('=' * 70)
+!python bench/eval.py --vec out/gpu_cbow_fp16.vec --compare out/cpu_cbow.vec --topn 8
+
+# Sanity you can eyeball: `three` should pull in four/five/two/six, and
+# `music` should pull in musical/musicians -- not just -ing/-tion lookalikes.
+# If neighbours are all suffix twins and mean cos is ~1.0, it is undertrained.
+
+
+--------------------------------------------------------------------------------
+CELL 10 -- optional: skipgram. It makes one update per PAIR rather than per
+           center (~6x more updates and ~6x bigger negative tensors), so it
+           is slower and wants a smaller batch.
+--------------------------------------------------------------------------------
+!python -m floret_torch.train \
+  --input data/text8 --output out/gpu_sg \
+  --model skipgram --dim 300 --bucket 50000 --epoch 1 --lr 0.05 \
+  --batch 4096 --slab 4000000 --dtype fp32 --device cuda --seed 0 \
+  --workdir out/gpu_cbow_fp32.work --reuse-cache
+!python bench/eval.py --vec out/gpu_sg.vec --compare out/cpu_cbow.vec --topn 8
+
+
+--------------------------------------------------------------------------------
+CELL 11 -- if quality is still short of the CPU baseline, spend the speed
+           surplus on epochs before touching anything else. Your T4 did one
+           epoch in ~10s against a 371s CPU run, so 5 epochs is still ~35x.
+--------------------------------------------------------------------------------
+!python -m floret_torch.train \
+  --input data/text8 --output out/gpu_cbow_e5 \
+  --model cbow --dim 300 --bucket 50000 --epoch 5 --lr 0.05 \
+  --batch 8192 --slab 4000000 --dtype fp32 --device cuda --seed 0 \
+  --workdir out/gpu_cbow_fp32.work --reuse-cache
+!python bench/eval.py --vec out/gpu_cbow_e5.vec --compare out/cpu_cbow.vec --topn 8
+
+
+--------------------------------------------------------------------------------
+CELL 12 -- optional sweep if you want the batch/dtype tradeoff in one table
+           (trains once per combination, so keep the list short)
+--------------------------------------------------------------------------------
+!python bench/sweep.py --input data/text8 --workdir out/gpu_cbow_fp32.work \
+  --batches 4096,8192,16384 --dtypes fp32,fp16 --epoch 1
+
+
+--------------------------------------------------------------------------------
+CELL 13 -- download results
+--------------------------------------------------------------------------------
+from google.colab import files
+files.download('out/gpu_cbow_fp32.floret')
+files.download('out/gpu_cbow_fp32.vec')
+
+
+================================================================================
+WHAT TO SEND BACK
+================================================================================
+  - the TIMING line from cells 6, 7 and 10
+  - the CPU_TRAIN_SECONDS line from cell 8
+  - the full output of cell 9 (both WS353 numbers + the neighbour lists)
+That is enough to settle both questions: whether fp16 is worth keeping, and
+whether the GPU vectors clear the CPU quality bar.

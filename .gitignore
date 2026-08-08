@@ -1,0 +1,22 @@
+# Corpora and trained artifacts (100MB+ each, all reproducible)
+data/
+out/
+packages/
+*.floret
+*.vec
+*.bin
+floret_torch_bundle.zip
+
+# Environments
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# The Farsi project consumes floret_torch from the repo root or the uploaded
+# bundle; a copy is made only for local testing.
+colab/farsi_weasel/floret_torch/
+
+# Harness/local state
+.omp/
+colab/farsi_weasel/project.lock

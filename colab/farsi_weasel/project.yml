@@ -1,0 +1,143 @@
+title: "Farsi floret vectors on GPU (Colab)"
+description: |
+  Trains floret vectors for Persian/Farsi from Wikipedia, then packages them
+  into a spaCy pipeline.
+
+  Adapted from explosion/projects `pipelines/floret_wiki_oscar_vectors` with
+  the changes required to actually run on Colab:
+
+  * OSCAR is dropped. `unshuffled_deduplicated_fa` is gated behind an
+    agreement now and fails to load unauthenticated. Wikipedia comes from
+    `wikimedia/wikipedia` (config `20231101.fa`, open) instead of a 1.4 GB
+    `fawiki` XML dump plus wikiextractor.
+  * Paths point at /content, not /scratch, and n_process suits ~2 vCPUs.
+  * `train-vectors-gpu` replaces CPU floret with the PyTorch trainer. On a T4
+    this is the difference between minutes and hours; CPU floret remains
+    available as `train-vectors-cpu` for comparison.
+
+vars:
+  lang: "fa"
+  name: "fa_vectors"
+  # Corpus size. Persian Wikipedia is ~1M articles; 400k articles is a solid
+  # vector corpus and fits a Colab session. Set to -1 for everything.
+  max_texts: 400000
+  max_sents: -1
+  corpus_dir: "/content/corpus"
+  vectors_dir: "/content/vectors"
+  # 5/5 suits alphabetic scripts; Persian is alphabetic (Perso-Arabic).
+  vector_minn: 5
+  vector_maxn: 5
+  vector_dim: 300
+  vector_epoch: 5
+  vector_neg: 10
+  vector_bucket: 50000
+  vector_min_count: 20
+  vector_hash_count: 2
+  vector_lr: 0.05
+  # Keep in 4096-16384. The input-row gradient is un-normalized (as fastText
+  # does it), so an over-large batch accumulates hundreds of full-size
+  # gradients onto one row and diverges.
+  vector_batch: 8192
+  vector_dtype: "fp32"
+  vector_model: "cbow"
+  vector_thread: 2
+
+directories: ["corpus", "vectors", "packages"]
+
+workflows:
+  all:
+    - tokenize-wikipedia
+    - train-vectors-gpu
+    - init-vectors
+  cpu:
+    - tokenize-wikipedia
+    - train-vectors-cpu
+    - init-vectors
+
+commands:
+  - name: "tokenize-wikipedia"
+    help: "Stream Persian Wikipedia and write one tokenized sentence per line"
+    script:
+      - >-
+        python scripts/tokenize_corpus.py ${vars.lang}
+        ${vars.corpus_dir}/${vars.lang}.txt
+        --input-dataset wikimedia/wikipedia
+        --dataset-subset 20231101.${vars.lang}
+        --dataset-split train
+        --max-texts ${vars.max_texts}
+        --max-sents ${vars.max_sents}
+    deps:
+      - "scripts/tokenize_corpus.py"
+    outputs:
+      - "${vars.corpus_dir}/${vars.lang}.txt"
+
+  - name: "train-vectors-gpu"
+    help: "Train floret vectors on GPU (PyTorch)"
+    script:
+      - >-
+        python -m floret_torch.train
+        --input ${vars.corpus_dir}/${vars.lang}.txt
+        --output ${vars.vectors_dir}/${vars.lang}
+        --model ${vars.vector_model}
+        --mode floret
+        --dim ${vars.vector_dim}
+        --minn ${vars.vector_minn}
+        --maxn ${vars.vector_maxn}
+        --neg ${vars.vector_neg}
+        --epoch ${vars.vector_epoch}
+        --hashCount ${vars.vector_hash_count}
+        --bucket ${vars.vector_bucket}
+        --minCount ${vars.vector_min_count}
+        --lr ${vars.vector_lr}
+        --batch ${vars.vector_batch}
+        --dtype ${vars.vector_dtype}
+        --device cuda
+        --seed 0
+    deps:
+      - "${vars.corpus_dir}/${vars.lang}.txt"
+    outputs:
+      - "${vars.vectors_dir}/${vars.lang}.floret"
+
+  - name: "train-vectors-cpu"
+    help: "Train floret vectors on CPU (reference implementation)"
+    script:
+      - >-
+        python scripts/train_floret_cpu.py
+        --input ${vars.corpus_dir}/${vars.lang}.txt
+        --output ${vars.vectors_dir}/${vars.lang}_cpu
+        --model ${vars.vector_model}
+        --dim ${vars.vector_dim}
+        --minn ${vars.vector_minn}
+        --maxn ${vars.vector_maxn}
+        --neg ${vars.vector_neg}
+        --epoch ${vars.vector_epoch}
+        --hashcount ${vars.vector_hash_count}
+        --bucket ${vars.vector_bucket}
+        --mincount ${vars.vector_min_count}
+        --lr ${vars.vector_lr}
+        --thread ${vars.vector_thread}
+    deps:
+      - "${vars.corpus_dir}/${vars.lang}.txt"
+    outputs:
+      - "${vars.vectors_dir}/${vars.lang}_cpu.floret"
+
+  - name: "init-vectors"
+    help: "Load the floret table into a spaCy pipeline"
+    script:
+      - >-
+        python -m spacy init vectors ${vars.lang}
+        ${vars.vectors_dir}/${vars.lang}.floret
+        ${vars.vectors_dir}/${vars.name}
+        --mode floret
+        --name ${vars.lang}_${vars.name}
+    deps:
+      - "${vars.vectors_dir}/${vars.lang}.floret"
+    outputs:
+      - "${vars.vectors_dir}/${vars.name}"
+
+  - name: "evaluate-vectors"
+    help: "Nearest neighbours for a few Persian probe words"
+    script:
+      - "python scripts/eval_fa.py ${vars.vectors_dir}/${vars.name}"
+    deps:
+      - "${vars.vectors_dir}/${vars.name}"
