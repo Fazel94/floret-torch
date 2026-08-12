@@ -64,7 +64,7 @@ plausible-looking vectors that score near zero (WS353 −0.12, every pairwise
 cosine 1.00). `--input-grad normalized` selects the consistent-but-useless
 variant; the default `fasttext` is correct.
 
-**Batch size is a correctness knob, not just a speed knob.** The un-normalized
+**Batch size is a correctness knob.** The un-normalized
 update sums one full gradient per occurrence, so a word appearing *k* times in
 a batch moves *k*× as far. Oversized batches diverge outright. Keep
 `--batch` in 4096–16384 (default 8192). `--max-grad-norm` (default 1.0) bounds
