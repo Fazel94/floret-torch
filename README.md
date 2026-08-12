@@ -3,7 +3,7 @@
 [![tests](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml)
 
 GPU training for [floret](https://github.com/explosion/floret) vectors — fastText
-with subword n-grams hashed into a compact Bloom table — implemented in PyTorch,
+with subword n-grams hashed into a compact Bloom table implemented in PyTorch,
 exporting spaCy-compatible `.floret` and `.vec` tables.
 
 Hashing is byte-exact against CPU floret: the MurmurHash3 seed, the 128-bit →
@@ -31,15 +31,14 @@ memory bandwidth of the CPU it beats (16 GB/s vs ~34 GB/s dual-channel DDR4).
 
 ## How it gets the speed
 
-No custom CUDA kernel — none is possible on sm_50 (Triton and `torch.compile`
-need sm_70+, and there is no `nvcc` on the dev box). Two changes do the work:
+No custom CUDA kernel, Two changes do the work:
 
 1. **Per-batch word deduplication.** Every occurrence of a word in a batch has
    the same input vector, so its subword bag is gathered once and indexed.
    Exact, not an approximation: the table is constant within a forward pass.
    On text8, 65536 context tokens collapse to ~3900 unique words.
 2. **Hand-written gradients.** Autograd cost 139ms/batch on the output side
-   plus a 33ms dense optimizer sweep, because it allocates and zeroes dense
+   plus a 33ms dense optimizer sweep on my machine(GeForce 940MX), because it allocates and zeroes dense
    `(rows, dim)` gradient buffers each step and then updates all 121k rows.
    The SGNS gradient is analytic and touches few rows, so it is computed
    directly and scattered with `index_add_`, reproducing fastText's update
@@ -52,7 +51,7 @@ need sm_70+, and there is no `nvcc` on the dev box). Two changes do the work:
    W_r   += grad               # every row r of the input bag
    ```
 
-Measured effect on full text8: 235.7s → 178.5s.
+Measured effect on full text8: 235.7s → 178.5s on an antediluvian GeForce 940MX.
 
 ## Two things that will bite you
 
