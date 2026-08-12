@@ -1,5 +1,7 @@
 # floret-torch
 
+[![tests](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml)
+
 GPU training for [floret](https://github.com/explosion/floret) vectors — fastText
 with subword n-grams hashed into a compact Bloom table — implemented in PyTorch,
 exporting spaCy-compatible `.floret` and `.vec` tables.
@@ -13,15 +15,16 @@ modulo are all pinned by `tests/test_parity.py` against a live `floret` model.
 text8 (17M tokens), cbow, `dim=300 bucket=50000 hashCount=2 minn=4 maxn=5 neg=5`.
 Quality is Spearman ρ on WordSim-353.
 
-| run | hardware | epochs | train time | WS353 |
-|---|---|---|---|---|
-| CPU floret | i7-7500U, 4 threads | 1 | 188.1s | 0.2875 |
-| **floret-torch** | GeForce 940MX (sm_50) | 1 | **178.5s** | **0.3582** |
-| CPU floret | i7-7500U, 4 threads | 3 | 593.1s | 0.4738 |
-| **floret-torch** | Colab T4 | 3 | **~30s** | **0.4740** |
+| run | hardware | epochs | train time | pairs/sec | WS353 |
+|---|---|---|---|---|---|
+| CPU floret | i7-7500U, 4 threads | 1 | 188.1s | ~20k | 0.2875 |
+| **floret-torch** | GeForce 940MX (sm_50) | 1 | **178.5s** | **~21k** | **0.3582** |
+| CPU floret | i7-7500U, 4 threads | 3 | 593.1s | ~20k | 0.4738 |
+| **floret-torch** | Colab T4 | 3 | **~30s** | **~1M** | **0.4740** |
 
 At equal epochs the vectors are of equal quality (0.4740 vs 0.4738) and arrive
-~20× faster on a 4-core box, ~60× faster against Colab's 2 vCPUs.
+~20× faster on a 4-core box, ~60× faster against Colab's 2 vCPUs — ~1M training
+pairs/sec on a T4 against ~20k on the CPU.
 
 The 940MX result is the interesting one: it wins despite having *half* the
 memory bandwidth of the CPU it beats (16 GB/s vs ~34 GB/s dual-channel DDR4).
@@ -68,11 +71,20 @@ a batch moves *k*× as far. Oversized batches diverge outright. Keep
 per-batch row movement and turns divergence into slow learning; training aborts
 with an actionable message if the loss goes non-finite anyway.
 
+## Install
+
+```bash
+pip install git+https://github.com/Fazel94/floret-torch   # or: pip install -e '.[bench]' from a clone
+```
+
+Needs Python >=3.9 and PyTorch (any build; CUDA only for the GPU path). torch is
+deliberately not a declared dependency so pip never pulls a second multi-GB copy.
+
 ## Usage
 
 ```bash
 python -m venv --system-site-packages .venv     # reuses an existing torch
-.venv/bin/pip install floret mmh3 pytest
+.venv/bin/pip install -e '.[bench]'
 
 .venv/bin/python -m pytest tests/test_parity.py -q      # hashing parity gate
 
@@ -136,3 +148,7 @@ weasel run cpu colab/farsi_weasel       # same, CPU floret for comparison
 Algorithm and file formats follow [explosion/floret](https://github.com/explosion/floret)
 and fastText. The Weasel project derives from
 [explosion/projects](https://github.com/explosion/projects) `pipelines/floret_wiki_oscar_vectors`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). floret, fastText and explosion/projects are MIT too.
