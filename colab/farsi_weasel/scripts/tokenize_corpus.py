@@ -1,7 +1,8 @@
-"""Stream a HuggingFace text dataset (or JSONL) -> one tokenized sentence per line.
+"""Tokenize a local WikiExtractor JSONL (or a HuggingFace text dataset) ->
+one tokenized sentence per line.
 
 Adapted from explosion/projects `floret_wiki_oscar_vectors`
-(scripts/tokenize_resource.py) with three changes needed to run on Colab today:
+(scripts/tokenize_resource.py) with the changes needed to run on Colab today:
 
 1. `use_auth_token=` was REMOVED from `datasets.load_dataset`; modern versions
    use `token=`. The upstream script raises TypeError on datasets>=3.
@@ -9,7 +10,10 @@ Adapted from explosion/projects `floret_wiki_oscar_vectors`
    ~2 vCPUs, and forking a spaCy pipeline per worker there costs more than it
    saves, so tokenization uses `nlp.pipe` in-process.
 3. Adds `--max-sents`, so you can cap corpus size to fit a Colab session
-   instead of streaming an entire Wikipedia.
+   instead of consuming an entire Wikipedia.
+4. `--max-texts` caps every input source (JSONL, plain text, HF dataset)
+   uniformly, not just the HF streaming path -- the default project.yml
+   pipeline now reads a local WikiExtractor JSONL, not the HF dataset.
 
 Output format is what floret/fastText expects: whitespace-separated tokens,
 one sentence per line.
@@ -30,12 +34,16 @@ WS = re.compile(r"\s+")
 def iter_texts(args) -> Iterator[str]:
     if args.input_jsonl:
         import srsly
-        for row in srsly.read_jsonl(args.input_jsonl):
+        rows: Iterable = srsly.read_jsonl(args.input_jsonl)
+        rows = rows if args.max_texts <= 0 else islice(rows, args.max_texts)
+        for row in rows:
             yield row["text"]
         return
     if args.input_text:
         with open(args.input_text, encoding="utf-8") as f:
-            for line in f:
+            lines: Iterable = f
+            lines = lines if args.max_texts <= 0 else islice(lines, args.max_texts)
+            for line in lines:
                 yield line
         return
     from datasets import load_dataset

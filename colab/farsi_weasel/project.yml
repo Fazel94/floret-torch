@@ -7,9 +7,14 @@ description: |
   the changes required to actually run on Colab:
 
   * OSCAR is dropped. `unshuffled_deduplicated_fa` is gated behind an
-    agreement now and fails to load unauthenticated. Wikipedia comes from
-    `wikimedia/wikipedia` (config `20231101.fa`, open) instead of a 1.4 GB
-    `fawiki` XML dump plus wikiextractor.
+    agreement now and fails to load unauthenticated.
+  * Wikipedia uses the same route as upstream: download the `fawiki` XML
+    dump and run it through WikiExtractor (`--no-templates`) before
+    tokenizing. The `wikimedia/wikipedia` HF dataset's raw text field still
+    carries `[[wikilinks]]`, `{{templates}}` and HTML that would otherwise
+    end up as floret vocabulary. `cleanup-corpus` deletes the dump and
+    extracted JSONL right after tokenizing so the disk cost is temporary
+    (~1.3 GB dump + a few GB extracted, then reclaimed).
   * Paths point at /content, not /scratch, and n_process suits ~2 vCPUs.
   * `train-vectors-gpu` replaces CPU floret with the PyTorch trainer. On a T4
     this is the difference between minutes and hours; CPU floret remains
@@ -26,6 +31,12 @@ vars:
   # vector corpus and fits a Colab session. Set to -1 for everything.
   max_texts: 400000
   max_sents: -1
+  # "latest" resolves to the current dump; pin a date (e.g. "20240201") to
+  # reproduce a specific run.
+  wikipedia_date: "latest"
+  n_process: 2
+  downloaded_dir: "/content/downloaded"
+  extracted_dir: "/content/extracted"
   corpus_dir: "/content/corpus"
   vectors_dir: "/content/vectors"
   # 5/5 suits alphabetic scripts; Persian is alphabetic (Perso-Arabic).
@@ -53,31 +64,66 @@ directories: ["corpus", "vectors", "packages"]
 
 workflows:
   all:
+    - download-wikipedia
+    - extract-wikipedia
     - tokenize-wikipedia
+    - cleanup-corpus
     - train-vectors-gpu
     - init-vectors
     - package-vectors
   cpu:
+    - download-wikipedia
+    - extract-wikipedia
     - tokenize-wikipedia
+    - cleanup-corpus
     - train-vectors-cpu
     - init-vectors
 
 commands:
+  - name: "download-wikipedia"
+    help: "Download the fawiki XML dump"
+    script:
+      - "mkdir -p ${vars.downloaded_dir}"
+      - >-
+        curl -fL --retry 3 -o
+        ${vars.downloaded_dir}/${vars.lang}wiki-${vars.wikipedia_date}-pages-articles.xml.bz2
+        https://dumps.wikimedia.org/${vars.lang}wiki/${vars.wikipedia_date}/${vars.lang}wiki-${vars.wikipedia_date}-pages-articles.xml.bz2
+    outputs:
+      - "${vars.downloaded_dir}/${vars.lang}wiki-${vars.wikipedia_date}-pages-articles.xml.bz2"
+
+  - name: "extract-wikipedia"
+    help: "Run WikiExtractor over the dump, stripping wikitext markup"
+    script:
+      - >-
+        python -m wikiextractor.WikiExtractor
+        --json --no-templates -b 1000G -q
+        --processes ${vars.n_process}
+        ${vars.downloaded_dir}/${vars.lang}wiki-${vars.wikipedia_date}-pages-articles.xml.bz2
+        -o ${vars.extracted_dir}
+    deps:
+      - "${vars.downloaded_dir}/${vars.lang}wiki-${vars.wikipedia_date}-pages-articles.xml.bz2"
+    outputs:
+      - "${vars.extracted_dir}/AA/wiki_00"
+
   - name: "tokenize-wikipedia"
-    help: "Stream Persian Wikipedia and write one tokenized sentence per line"
+    help: "Tokenize the WikiExtractor JSONL into one sentence per line"
     script:
       - >-
         python scripts/tokenize_corpus.py ${vars.lang}
         ${vars.corpus_dir}/${vars.lang}.txt
-        --input-dataset wikimedia/wikipedia
-        --dataset-subset 20231101.${vars.lang}
-        --dataset-split train
+        --input-jsonl ${vars.extracted_dir}/AA/wiki_00
         --max-texts ${vars.max_texts}
         --max-sents ${vars.max_sents}
     deps:
       - "scripts/tokenize_corpus.py"
+      - "${vars.extracted_dir}/AA/wiki_00"
     outputs:
       - "${vars.corpus_dir}/${vars.lang}.txt"
+
+  - name: "cleanup-corpus"
+    help: "Delete the raw dump and extracted JSONL, keeping only the tokenized corpus"
+    script:
+      - "rm -rf ${vars.downloaded_dir} ${vars.extracted_dir}"
 
   - name: "train-vectors-gpu"
     help: "Train floret vectors on GPU (PyTorch)"

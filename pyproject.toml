@@ -13,7 +13,7 @@ dependencies = ["numpy", "mmh3"]
 # torch is deliberately not a hard dependency: on Colab and most GPU boxes it
 # is already present, and pip would otherwise pull a second multi-GB copy.
 bench = ["floret", "pytest"]
-weasel = ["spacy>=3.2", "weasel", "datasets"]
+weasel = ["spacy>=3.2", "weasel", "datasets", "wikiextractor"]
 
 [project.scripts]
 floret-torch = "floret_torch.train:main"
