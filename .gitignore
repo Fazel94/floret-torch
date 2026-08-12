@@ -12,6 +12,9 @@ floret_torch_bundle.zip
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
+dist/
 
 # The Farsi project consumes floret_torch from the repo root or the uploaded
 # bundle; a copy is made only for local testing.
