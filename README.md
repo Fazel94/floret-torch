@@ -6,9 +6,6 @@ GPU training for [floret](https://github.com/explosion/floret) vectors — fastT
 with subword n-grams hashed into a compact Bloom table implemented in PyTorch,
 exporting spaCy-compatible `.floret` and `.vec` tables.
 
-Hashing is byte-exact against CPU floret: the MurmurHash3 seed, the 128-bit →
-4×uint32 key split, `hashCount` truncation, n-gram extraction and the bucket
-modulo are all pinned by `tests/test_parity.py` against a live `floret` model.
 
 ## Results
 
@@ -52,6 +49,10 @@ No custom CUDA kernel, Two changes do the work:
    ```
 
 Measured effect on full text8: 235.7s → 178.5s on an antediluvian GeForce 940MX.
+
+Hashing is byte-exact against CPU floret: the MurmurHash3 seed, the 128-bit →
+4×uint32 key split, `hashCount` truncation, n-gram extraction and the bucket
+modulo are all pinned by `tests/test_parity.py` against a live `floret` model.
 
 ## Two things that will bite you
 
