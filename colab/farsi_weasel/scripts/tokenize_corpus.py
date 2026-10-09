@@ -6,9 +6,10 @@ Adapted from explosion/projects `floret_wiki_oscar_vectors`
 
 1. `use_auth_token=` was REMOVED from `datasets.load_dataset`; modern versions
    use `token=`. The upstream script raises TypeError on datasets>=3.
-2. Upstream forks a multiprocessing Pool sized for a 16-core box. Colab has
-   ~2 vCPUs, and forking a spaCy pipeline per worker there costs more than it
-   saves, so tokenization uses `nlp.pipe` in-process.
+2. Upstream forks a multiprocessing Pool sized for a 16-core box. For a blank
+   tokenizer, pickling docs between processes costs more than it saves, even
+   on real cores (8-core box: ~29 MB/min with workers vs ~45 MB/min
+   in-process), so tokenization defaults to `nlp.pipe` in-process.
 3. Adds `--max-sents`, so you can cap corpus size to fit a Colab session
    instead of consuming an entire Wikipedia.
 4. `--max-texts` caps every input source (JSONL, plain text, HF dataset)
@@ -82,6 +83,9 @@ def main() -> int:
     p.add_argument("--max-sents", type=int, default=-1,
                    help="stop after this many output sentences (-1 = all)")
     p.add_argument("--batch-size", type=int, default=200)
+    p.add_argument("--n-process", type=int, default=1,
+                   help="spaCy nlp.pipe worker processes; leave at 1 "
+                        "(measured slower with >1, even on 8 real cores)")
     args = p.parse_args()
 
     nlp = build_nlp(args.lang)
@@ -91,7 +95,8 @@ def main() -> int:
     texts = (WS.sub(" ", t.strip()) for t in iter_texts(args) if t and t.strip())
     n_sents = n_tokens = 0
     with open(out, "w", encoding="utf-8") as fh:
-        for doc in nlp.pipe(texts, batch_size=args.batch_size):
+        for doc in nlp.pipe(texts, batch_size=args.batch_size,
+                             n_process=args.n_process):
             for sent in doc.sents:
                 toks = [t.text for t in sent if not t.is_space]
                 if len(toks) < 2:
