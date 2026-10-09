@@ -1,16 +1,29 @@
-# floret-torch
+# floret-torch: fastText-style word vectors, trained on the GPU
 
 [![tests](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml/badge.svg)](https://github.com/Fazel94/floret-torch/actions/workflows/tests.yml)
 
-Train [floret](https://github.com/explosion/floret) word vectors on a GPU, ~20× faster than
-CPU floret at the same quality, and load them straight into spaCy. floret is fastText with
-a compact subword table: each character n-gram is hashed to `hashCount` rows of a fixed
-table of `bucket` rows (Bloom-filter style), so any word, even an unseen one, gets a vector
-from its n-grams. floret-torch reimplements training in PyTorch and writes the same
-`.floret` and `.vec` files.
+floret-torch trains fastText-style word vectors on a GPU, ~20× faster than CPU floret on a
+4-core laptop at the same quality, and the vectors load straight into spaCy. The bet behind
+it: training is mostly gather and scatter over big tables, so memory bandwidth limits it,
+and GPUs have far more of that than CPUs.
 
-Use it when CPU floret training is the slow step: a large corpus, or a Colab session with a
-GPU but only two CPU cores.
+[fastText](https://fasttext.cc/), Facebook AI Research's word-vector library, trains only
+on CPU threads. floret-torch was inspired by Amazon's
+[SageMaker BlazingText](https://docs.aws.amazon.com/sagemaker/latest/dg/blazingtext.html),
+which trains fastText-style subword vectors on GPUs as a managed AWS service, and covers
+the same word-vector use cases: embeddings for large corpora, and vectors for rare,
+misspelled or unseen words built from their character n-grams. Unlike BlazingText it is
+open source and runs on your own GPU. It reimplements fastText's training loop in PyTorch,
+with the same algorithm and update order, and trains fastText's
+[floret](https://github.com/explosion/floret) variant.
+
+floret is fastText with a compact subword table: each character n-gram is hashed to
+`hashCount` rows of a fixed table of `bucket` rows (Bloom-filter style), so any word, even
+an unseen one, gets a vector from its n-grams. floret-torch writes the same `.floret` and
+`.vec` files as CPU floret.
+
+Use it when CPU training is the slow step: a large corpus, or a Colab session with a GPU
+but only two CPU cores.
 
 ## Results
 
@@ -21,7 +34,7 @@ Quality is Spearman ρ on WordSim-353 (WS353), a word-similarity benchmark.
 | epochs | run | hardware | train time | WS353 |
 |---:|---|---|---:|---:|
 | 1 | CPU floret | i7-7500U, 4 threads | 188.1s | 0.2875 |
-| 1 | floret-torch | GeForce 940MX (sm_50) | 178.5s | 0.3582 |
+| 1 | floret-torch | GeForce 940MX (2016 laptop GPU) | 178.5s | 0.3582 |
 | 3 | CPU floret | i7-7500U, 4 threads | 593.1s | 0.4738 |
 | 3 | floret-torch | Colab T4 | ~30s | 0.4740 |
 
@@ -29,7 +42,7 @@ At three epochs the vectors match CPU floret (0.4740 vs 0.4738). Training is ~20
 than the 4-core laptop, about 1M training pairs/sec on a T4.
 
 The 940MX result is the odd one. It wins with half the memory bandwidth of the CPU it beats
-(16 GB/s vs ~34 GB/s dual-channel DDR4).
+(16 GB/s vs ~34 GB/s dual-channel DDR4); see [the idea](#the-idea) for why.
 
 Hashing is byte-exact against CPU floret, so a word maps to the same table rows in both.
 `tests/test_parity.py` checks this against a live `floret` model: the MurmurHash3 seed,
@@ -76,8 +89,12 @@ Writes `out/vectors.floret` and `out/vectors.vec`. Load into spaCy with:
 python -m spacy init vectors en out/vectors.floret out/pipeline --mode floret
 ```
 
-`--mode fasttext` (the two-table layout) raises `NotImplementedError`; use CPU floret for
-that layout.
+Only the floret layout is implemented. `--mode fasttext` (plain fastText's separate word
+and n-gram tables) raises `NotImplementedError`; use CPU fastText or floret for that.
+
+Text classification (fastText's `supervised` mode, as in BlazingText) is not implemented
+yet; it is in progress. Until then, the vectors work as features for a spaCy `textcat`
+component or any other classifier.
 
 ### fp16
 
@@ -91,10 +108,25 @@ on a T4: matmul 5.02→0.55ms (9×) but `embedding_bag` fwd+bwd only 28.27→24.
 and `embedding_bag` is the hot path. On sm_50 GPUs fp16 is *slower* than fp32 (no tensor
 cores, and no native paired-fp16 math below sm_53).
 
+## The idea
+
+Training word vectors is mostly gather and scatter, not math. Each step reads a few hundred
+scattered rows from big tables (a word's subword rows, the output rows of the true word and
+its negatives), does a few dot products, and adds small updates back into those same rows.
+In PyTorch that is `embedding_bag` (gather and sum) and `index_add_` (scatter-add). With so
+little arithmetic per byte moved, the limit is memory bandwidth, not compute. That is why
+fp16's faster arithmetic barely helps (see [fp16](#fp16)).
+
+GPUs have far more memory bandwidth than CPUs: a T4 has 320 GB/s against ~34 GB/s for a
+dual-channel DDR4 laptop, and datacenter GPUs have several TB/s. They also keep thousands
+of memory reads in flight, while a CPU thread stalls on each cache miss. These reads are
+small and random, so that second point matters too. It is likely why even the 940MX,
+with less peak bandwidth than the laptop CPU, comes out ahead.
+
 ## How it gets the speed
 
 No custom CUDA kernel: Triton and `torch.compile` need a GPU of compute capability 7.0
-(sm_70) or newer, the dev box's 940MX is 5.0 (sm_50), and it has no `nvcc`. Two changes do
+(sm_70) or newer, my dev box's 940MX is 5.0 (sm_50), and it has no `nvcc`. Two changes do
 the work.
 
 **Per-batch word deduplication.** A word's input vector is the sum of its subword rows (its
@@ -105,11 +137,12 @@ a forward pass. On text8, 65536 context tokens collapse to ~3900 unique words.
 **Hand-written gradients.** Both cbow and skip-gram train with negative sampling (SGNS in
 the code): score the true output word against a few random ones. With autograd this cost
 139ms/batch on the output side plus a 33ms dense optimizer sweep, because autograd
-allocates and zeroes dense
-`(rows, dim)` gradient buffers each step and then updates all 121k rows. The SGNS gradient
-has a closed form and touches few rows, so it is computed directly and scattered with
-`index_add_`, in the same order as fastText's `Model::update`. For hidden vector `h` (the
-averaged input bag), output-word vector `w_o` and label 1 (true word) or 0 (negative):
+allocates and zeroes dense `(rows, dim)` gradient buffers each step and then updates all
+121k rows. The SGNS gradient has a closed form and touches few rows, so it is computed
+directly and scattered with `index_add_`, in the same order as fastText's
+[`Model::update`](https://github.com/facebookresearch/fastText/blob/main/src/model.cc).
+For hidden vector `h` (the averaged input bag), output-word vector `w_o` and label 1 (true
+word) or 0 (negative):
 
 ```
 alpha  = lr * (label - sigmoid(w_o . h))
@@ -145,7 +178,7 @@ floret_torch/     vocab (hashing) · data (binarize) · model (SGNS) ·
 tests/            hashing + word-vector parity against CPU floret
 bench/            cpu_baseline · eval (WS353 + neighbours) · sweep
 colab/            T4 notebook, plain-command version, bundle script
-colab/farsi_weasel/   Weasel project: Persian Wikipedia → floret → spaCy
+colab/farsi_weasel/   Persian Wikipedia → floret → spaCy pipeline
 ```
 
 ## Farsi / Weasel pipeline
@@ -174,7 +207,8 @@ weasel run cpu colab/farsi_weasel   # CPU floret instead; no packaging
 ## Credits
 
 Algorithm and file formats follow [explosion/floret](https://github.com/explosion/floret)
-and fastText. The Weasel project derives from
+and fastText. The GPU approach was inspired by Amazon SageMaker BlazingText. The Weasel
+project derives from
 [explosion/projects](https://github.com/explosion/projects) `pipelines/floret_wiki_oscar_vectors`.
 
 ## Citation
@@ -184,7 +218,7 @@ If you use floret-torch in your work, please cite:
 ```bibtex
 @software{fazeli2026florettorch,
   author  = {Fazeli, Mohammad},
-  title   = {floret-torch: GPU training for floret vectors in PyTorch},
+  title   = {floret-torch: fastText-style word vectors, trained on the GPU},
   year    = {2026},
   version = {0.1.0},
   url     = {https://github.com/Fazel94/floret-torch},
