@@ -177,6 +177,21 @@ Algorithm and file formats follow [explosion/floret](https://github.com/explosio
 and fastText. The Weasel project derives from
 [explosion/projects](https://github.com/explosion/projects) `pipelines/floret_wiki_oscar_vectors`.
 
+## Citation
+
+If you use floret-torch in your work, please cite:
+
+```bibtex
+@software{fazeli2026florettorch,
+  author  = {Fazeli, Mohammad},
+  title   = {floret-torch: GPU training for floret vectors in PyTorch},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/Fazel94/floret-torch},
+  note    = {Contact: kiyarash@nlogn.ir}
+}
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE). floret, fastText and explosion/projects are MIT too.

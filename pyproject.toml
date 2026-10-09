@@ -11,7 +11,7 @@ dependencies = ["numpy", "mmh3"]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "Kiyarash Fazeli", email = "caci96@gmail.com"}]
+authors = [{name = "Kiyarash Fazeli", email = "kiyarash@nlogn.ir"}]
 keywords = ["floret", "fasttext", "word-vectors", "spacy", "pytorch", "gpu", "embeddings"]
 classifiers = [
   "Development Status :: 4 - Beta",
